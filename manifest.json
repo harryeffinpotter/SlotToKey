@@ -1,0 +1,18 @@
+{
+  /*
+   | This file is automatically updated by ModManifestBuilder
+   | when the project is compiled.
+   | 
+   | Changes made to this file may be overwritten.
+   | 
+   */
+  "$schema": "https://smapi.io/schemas/manifest.json",
+  "UniqueID": "HarryEffinPotter.SlotToKey",
+  "Name": "SlotToKey",
+  "Author": "HarryEffinPotter",
+  "Version": "1.0.0-Debug",
+  "Description": "Allows user to bind specific inventory item sot to any key or button!",
+  "MinimumApiVersion": "4.0.0",
+  "EntryDll": "SlotToKey.dll",
+  "UpdateKeys": []
+}
