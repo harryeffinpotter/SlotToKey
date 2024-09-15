@@ -11,7 +11,7 @@
   "Name": "SlotToKey",
   "Author": "HarryEffinPotter",
   "Version": "1.0.0-Debug",
-  "Description": "Allows user to bind specific inventory item sot to any key or button!",
+  "Description": "Allows user to bind specific inventory item to any key/button! You can also bind key combos to a specific item as well. If you press a previously set keybind and the item is no longer in your inventory, it will automatically remove the keybind. Users can also clear all binds by pressing the correct key combo.",
   "MinimumApiVersion": "4.0.0",
   "EntryDll": "SlotToKey.dll",
   "UpdateKeys": []

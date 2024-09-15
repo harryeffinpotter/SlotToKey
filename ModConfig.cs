@@ -1,70 +1,66 @@
-﻿using StardewModdingAPI;
-using System.Collections.Generic;
-
+﻿
 public sealed class ModConfig
 {
-    public Dictionary<SButton, int> SlotKeyBindings { get; set; }  // Bindings for slots
-    public Dictionary<SButton, int> ItemKeyBindings { get; set; }  // Bindings for items
-
-    // Default keyboard keys to use for combination binds.
-    public List<SButton> ModifierKeys { get; set; }
-    // Default controller buttons to use for combination binds.
-    public List<SButton> ModifierButtons { get; set; }
-    // Default controller buttons and keyboard keys to disable for single binds.
-    public List<SButton> DisabledSingleButtons { get; set; }
-
-    public bool BindToItem { get; set; }  // Whether to bind to item instead of slot
+    public List<string> ButtonsToEnterBindMode { get; set; } // Default button combo to Enter Bind mode.
+    public List<string> ButtonsToClearAllBinds { get; set; } // Default Button combo used to clear all binds.
+    public List<string> ModifierKeys { get; set; } // Default keyboard keys to use for combination binds.
+    public List<string> ModifierButtons { get; set; }    // Default controller buttons to use for combination binds.
+    public List<string> DisabledSingleButtons { get; set; }    // Default controller buttons and keyboard keys to disable for single binds.
 
     public ModConfig()
     {
-        this.SlotKeyBindings = new Dictionary<SButton, int>();
-        this.ItemKeyBindings = new Dictionary<SButton, int>();
-
-        this.ModifierKeys = new List<SButton>
+        this.ButtonsToEnterBindMode = new List<string>()
             {
-                SButton.LeftControl,
-                SButton.RightControl,
-                SButton.LeftAlt,
-                SButton.RightAlt,
-                SButton.LeftShift,
-                SButton.RightShift
+                 "ControllerBack+ControllerStart",
+                 "F1+F2"
             };
-
-        this.ModifierButtons = new List<SButton>(new[]
-        {
-                SButton.LeftShoulder,
-                SButton.RightShoulder,
-                SButton.LeftTrigger,
-                SButton.RightTrigger,
-                SButton.DPadUp,  // D-pad as modifier
-                SButton.DPadDown,
-                SButton.DPadLeft,
-                SButton.DPadRight,
-                SButton.LeftStick,
-                SButton.RightStick
-            });
-
-        this.DisabledSingleButtons = new List<SButton>
+        this.ButtonsToClearAllBinds = new List<string>()
             {
-                SButton.E,
-                SButton.F,
-                SButton.MouseLeft,
-                SButton.MouseRight,
-                SButton.MouseMiddle,
-                SButton.MouseX1,
-                SButton.MouseX2,
-                SButton.W,
-                SButton.A,
-                SButton.S,
-                SButton.D,
-                SButton.ControllerA,
-                SButton.ControllerB,
-                SButton.ControllerX,
-                SButton.ControllerY,
-                SButton.ControllerStart,
-                SButton.ControllerBack
+                 "LeftShoulder+ControllerBack",
+                 "F1+F4"
             };
+        this.ModifierKeys = new List<string>
+                {
+                    "LeftControl",
+                    "RightControl",
+                    "LeftAlt",
+                    "RightAlt",
+                    "LeftShift",
+                    "RightShift"
+                };
 
-        this.BindToItem = false;  // Default is to bind to slots
+        this.ModifierButtons = new List<string>
+            {
+                    "LeftShoulder",
+                    "RightShoulder",
+                    "LeftTrigger",
+                    "RightTrigger",
+                    "LeftStick",
+                    "RightStick"
+                };
+
+        this.DisabledSingleButtons = new List<string>
+                {
+                    "E",
+                    "F",
+                    "MouseLeft",
+                    "MouseRight",
+                    "MouseMiddle",
+                    "MouseX1",
+                    "MouseX2",
+                    "Escape",
+                    "Enter",
+                    "F1",
+                    "W",
+                    "A",
+                    "S",
+                    "D",
+                    "ControllerA",
+                    "ControllerB",
+                    "ControllerX",
+                    "ControllerY",
+                    "ControllerStart",
+                    "ControllerBack"
+                };
     }
 }
