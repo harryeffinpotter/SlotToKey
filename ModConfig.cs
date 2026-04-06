@@ -20,6 +20,9 @@ namespace QuickSelect
         /// <summary>Auto-use consumables (food/bombs/stairs) and swap back to previous item.</summary>
         public bool AutoUseAndSwapBack { get; set; } = true;
 
+        /// <summary>Controller button label style: "Sony" or "Xbox".</summary>
+        public string ControllerStyle { get; set; } = "Sony";
+
         /// <summary>Extra item IDs the user considers consumable (auto-used and swapped back).</summary>
         public List<string> ExtraConsumableIds { get; set; } = new();
 

@@ -30,7 +30,7 @@ namespace QuickSelect
         private string? bindCountdownTarget;
         private int bindCooldown = 0;
 
-        // combo fires on release, not press
+        // wait til all combo buttons released before firing
         private ItemBinding? pendingBinding = null;
         private Farmer? pendingPlayer = null;
         private List<SButton> pendingComboButtons = new();
@@ -38,30 +38,36 @@ namespace QuickSelect
         private bool suppressNextUse = false;
         private int suppressUseTimeout = 0;
 
-        // auto-use + swap back state
         private enum SwapBackState { None, WaitingToEat, WaitingForEatFinish, SwapBack }
         private SwapBackState swapBackState = SwapBackState.None;
         private Item? previousItem = null;
         private Item? lastKnownItem = null;
         private int swapBackTimer = 0;
         private bool swapBackItemIsFood = false;
+        private int stateWatchdog = 0;
 
         private static readonly HashSet<string> BuiltInConsumableIds = new()
         {
-            "286", "287", "288", // cherry bomb, bomb, mega bomb
+            "286", "287", "288", // bombs
             "749",               // staircase
             "891",               // qi seasoning
         };
 
+        private Texture2D? buttonSheet;
+
         public override void Entry(IModHelper helper)
         {
             Config = helper.ReadConfig<ModConfig>();
+            try { buttonSheet = helper.ModContent.Load<Texture2D>("assets/buttons.png"); }
+            catch { buttonSheet = null; }
+
             helper.Events.GameLoop.GameLaunched += OnGameLaunched;
             helper.Events.GameLoop.SaveLoaded += OnSaveLoaded;
             helper.Events.GameLoop.Saving += OnSaving;
             helper.Events.Input.ButtonPressed += OnButtonPressed;
             helper.Events.Input.ButtonReleased += OnButtonReleased;
             helper.Events.GameLoop.UpdateTicked += OnUpdateTicked;
+            helper.Events.Display.RenderedHud += OnRenderedHud;
         }
 
         private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
@@ -75,12 +81,9 @@ namespace QuickSelect
                 bindings[kv.Key] = new ItemBinding { ItemName = kv.Value };
 
             playerSlotBindings[player.UniqueMultiplayerID] = bindings;
-            Monitor.Log($"Loaded {Config.Bindings.Count} bindings.", LogLevel.Info);
         }
 
         private void OnSaving(object? sender, SavingEventArgs e) => SaveBindings();
-
-        #region GMCM
 
         private void OnGameLaunched(object? sender, GameLaunchedEventArgs e)
         {
@@ -130,6 +133,17 @@ namespace QuickSelect
                 tooltip: () => "ON: food/bombs/stairs auto-use and swap back. OFF: just equips."
             );
 
+            configMenu.AddSectionTitle(mod: ModManifest, text: () => "Display");
+
+            configMenu.AddTextOption(
+                mod: ModManifest,
+                getValue: () => Config.ControllerStyle,
+                setValue: v => Config.ControllerStyle = v,
+                name: () => "Controller Style",
+                tooltip: () => "Sony or Xbox button labels",
+                allowedValues: new[] { "Sony", "Xbox" }
+            );
+
             configMenu.AddSectionTitle(mod: ModManifest, text: () => "Advanced");
 
             configMenu.AddParagraph(
@@ -138,9 +152,7 @@ namespace QuickSelect
             );
         }
 
-        #endregion
-
-        #region Helpers
+        // helpers
 
         private string GetButtonKey(IEnumerable<SButton> buttons)
             => string.Join("+", buttons.OrderBy(b => b).Select(b => b.ToString()));
@@ -172,17 +184,16 @@ namespace QuickSelect
         private void ShowHUD(string message)
             => Game1.addHUDMessage(new HUDMessage(message) { noIcon = true });
 
-        #endregion
-
-        #region Input
+        // input
 
         private void OnButtonPressed(object? sender, ButtonPressedEventArgs e)
         {
             Farmer? currentPlayer = GetCurrentPlayer();
             if (currentPlayer == null) return;
 
-            // snapshot what were holding BEFORE the button does anything (r1 shifts toolbar etc)
-            if (currentPlayer.CurrentItem != null)
+            // snapshot current item BEFORE the button does anything (R1 shifts toolbar etc)
+            // only on fresh press session, dont overwrite mid-combo
+            if (heldButtons.Count == 0 && currentPlayer.CurrentItem != null)
                 lastKnownItem = currentPlayer.CurrentItem;
 
             if (!playerSlotBindings.ContainsKey(currentPlayer.UniqueMultiplayerID))
@@ -211,7 +222,6 @@ namespace QuickSelect
             if (!Context.IsWorldReady || Game1.activeClickableMenu != null)
                 return;
 
-            // keyboard bind mode — instant
             if (e.Button == Config.BindModeKey)
             {
                 Helper.Input.Suppress(e.Button);
@@ -220,7 +230,6 @@ namespace QuickSelect
                 return;
             }
 
-            // controller bind mode — hold to activate
             if (e.Button == Config.BindModeButton)
             {
                 bindHoldStartTick = (int)Game1.ticks;
@@ -228,11 +237,9 @@ namespace QuickSelect
                 return;
             }
 
-            // skip matching during cooldown or active auto-use
             if (bindCooldown > 0 || swapBackState != SwapBackState.None)
                 return;
 
-            // match combo
             var comboButtons = heldButtons.Where(b => !IsDirectionalButton(b)).ToList();
             if (comboButtons.Count == 0) return;
             if (comboButtons.Count == 1 && Config.DisabledSingleButtons.Contains(comboButtons[0])) return;
@@ -245,7 +252,6 @@ namespace QuickSelect
                 foreach (var btn in comboButtons)
                     Helper.Input.Suppress(btn);
 
-                // recognized — but wait for all buttons released before firing
                 pendingBinding = binding;
                 pendingPlayer = currentPlayer;
                 pendingComboButtons = new List<SButton>(comboButtons);
@@ -259,7 +265,7 @@ namespace QuickSelect
 
         private void OnButtonReleased(object? sender, ButtonReleasedEventArgs e)
         {
-            // pending combo fires once ALL buttons are released
+            // fire pending bind once ALL buttons are released
             if (pendingBinding != null)
             {
                 pendingComboButtons.Remove(e.Button);
@@ -297,7 +303,6 @@ namespace QuickSelect
                 if (playerSlotBindings.TryGetValue(currentPlayer.UniqueMultiplayerID, out var clearBindings))
                 {
                     clearBindings.Clear();
-                    ShowHUD("All keybinds cleared.");
                     SaveBindings();
                 }
                 heldButtons.Clear();
@@ -324,13 +329,41 @@ namespace QuickSelect
             }
         }
 
-        #endregion
-
-        #region Tick
+        // tick
 
         private void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)
         {
-            // controller hold-to-bind
+            // watchdog so swap back can never get permanently stuck
+            if (swapBackState != SwapBackState.None || suppressNextUse)
+            {
+                stateWatchdog++;
+                if (stateWatchdog > 300)
+                {
+                    swapBackState = SwapBackState.None;
+                    suppressNextUse = false;
+                    suppressUseTimeout = 0;
+                    previousItem = null;
+                    if (Context.IsWorldReady)
+                    {
+                        Game1.player.completelyStopAnimatingOrDoingAction();
+                        Game1.player.CanMove = true;
+                    }
+                    stateWatchdog = 0;
+                }
+            }
+            else
+            {
+                stateWatchdog = 0;
+            }
+
+            // never let player be frozen if we have nothing happening
+            if (Context.IsWorldReady && !Game1.player.CanMove && swapBackState == SwapBackState.None
+                && Game1.activeClickableMenu == null && !Game1.player.UsingTool && !Game1.player.isEating)
+            {
+                Game1.player.completelyStopAnimatingOrDoingAction();
+                Game1.player.CanMove = true;
+            }
+
             if (bindHoldStartTick >= 0 && Context.IsWorldReady)
             {
                 int holdTicks = (int)(Config.BindHoldMs / 1000f * 60f);
@@ -350,7 +383,6 @@ namespace QuickSelect
             if (bindCooldown > 0)
                 bindCooldown--;
 
-            // pause before bind capture
             if (bindCountdown > 0)
             {
                 bindCountdown--;
@@ -373,16 +405,23 @@ namespace QuickSelect
                     suppressNextUse = false;
             }
 
-            // auto-use state machine
             switch (swapBackState)
             {
                 case SwapBackState.WaitingToEat:
                     swapBackTimer--;
-                    if (swapBackTimer <= 0 && Game1.player.CanMove && Game1.activeClickableMenu == null)
+                    if (swapBackTimer <= 0)
                     {
-                        Game1.player.eatHeldObject();
-                        swapBackState = SwapBackState.WaitingForEatFinish;
-                        swapBackTimer = 5;
+                        if (Game1.player.CanMove && Game1.activeClickableMenu == null)
+                        {
+                            Game1.player.eatHeldObject();
+                            swapBackState = SwapBackState.WaitingForEatFinish;
+                            swapBackTimer = 5;
+                        }
+                        else if (swapBackTimer < -120)
+                        {
+                            swapBackState = SwapBackState.None;
+                            previousItem = null;
+                        }
                     }
                     break;
 
@@ -411,9 +450,7 @@ namespace QuickSelect
             }
         }
 
-        #endregion
-
-        #region Bind Mode
+        // bind mode
 
         private void StartBindMode(Farmer player)
         {
@@ -426,7 +463,6 @@ namespace QuickSelect
 
             bindCountdownTarget = $"'{currentItem.DisplayName}'";
             bindCountdown = 12;
-            ShowHUD($"Bind what button to {currentItem.DisplayName}?");
         }
 
         private void FinalizeBind()
@@ -446,19 +482,15 @@ namespace QuickSelect
             string buttonKey = GetButtonKey(validButtons);
             string itemName = currentItemNameToBind!;
 
-            // prevent dupes
+            // dupe prevention
             if (bindings.ContainsKey(buttonKey))
                 bindings.Remove(buttonKey);
 
             var existingKey = bindings.FirstOrDefault(kv => kv.Value.ItemName == itemName).Key;
             if (existingKey != null)
-            {
                 bindings.Remove(existingKey);
-                ShowHUD($"Replaced previous binding ({existingKey})");
-            }
 
             bindings[buttonKey] = new ItemBinding { ItemName = itemName };
-            ShowHUD($"Bound {buttonKey} to {itemName}");
             SaveBindings();
 
             isBindingMode = false;
@@ -467,9 +499,7 @@ namespace QuickSelect
             heldButtons.Clear();
         }
 
-        #endregion
-
-        #region Item Selection
+        // item selection
 
         private void HandleBindingTriggered(Farmer player, ItemBinding binding)
         {
@@ -485,13 +515,12 @@ namespace QuickSelect
 
                 if (swapBackItemIsFood)
                 {
-                    // eat on next tick — calling during input events freezes the game
+                    // calling eatHeldObject during input events freezes the game, defer it
                     swapBackState = SwapBackState.WaitingToEat;
                     swapBackTimer = 3;
                 }
                 else
                 {
-                    // bombs/stairs — place now, swap back after delay
                     Game1.pressActionButton(
                         Microsoft.Xna.Framework.Input.Keyboard.GetState(),
                         Microsoft.Xna.Framework.Input.Mouse.GetState(),
@@ -522,9 +551,7 @@ namespace QuickSelect
 
             if (idx == -1)
             {
-                Game1.activeClickableMenu = new DialogueBoxWithItemIcon(
-                    $"'{itemName}' not in inventory. Removing keybind."
-                );
+                ShowHUD($"'{itemName}' not in inventory — removing keybind.");
                 RemoveBindingByItemName(player, itemName);
                 return false;
             }
@@ -577,7 +604,194 @@ namespace QuickSelect
                 bindings.Remove(key);
         }
 
-        #endregion
+        // toolbar overlay
+
+        private void OnRenderedHud(object? sender, RenderedHudEventArgs e)
+        {
+            if (!Context.IsWorldReady || Game1.activeClickableMenu != null || Game1.eventUp)
+                return;
+
+            Farmer? player = GetCurrentPlayer();
+            if (player == null) return;
+
+            if (!playerSlotBindings.TryGetValue(player.UniqueMultiplayerID, out var binds) || binds.Count == 0)
+                return;
+
+            Color outlineColor = new Color(127, 255, 220);
+            var boundInfo = new Dictionary<string, (Color color, string combo)>();
+            foreach (var kv in binds)
+            {
+                if (!boundInfo.ContainsKey(kv.Value.ItemName))
+                    boundInfo[kv.Value.ItemName] = (outlineColor, ShortenCombo(kv.Key));
+            }
+
+            Toolbar? toolbar = Game1.onScreenMenus.OfType<Toolbar>().FirstOrDefault();
+            if (toolbar == null) return;
+
+            var b2 = e.SpriteBatch;
+            for (int i = 0; i < toolbar.buttons.Count && i < player.Items.Count; i++)
+            {
+                var item = player.Items[i];
+                if (item == null || !boundInfo.TryGetValue(item.Name, out var info))
+                    continue;
+
+                var bounds = toolbar.buttons[i].bounds;
+                int thickness = 2;
+                int x = bounds.X - 2;
+                int y = bounds.Y - 2;
+                int w = bounds.Width + 4;
+                int h = bounds.Height + 4;
+                b2.Draw(Game1.staminaRect, new Rectangle(x, y, w, thickness), info.color);
+                b2.Draw(Game1.staminaRect, new Rectangle(x, y + h - thickness, w, thickness), info.color);
+                b2.Draw(Game1.staminaRect, new Rectangle(x, y, thickness, h), info.color);
+                b2.Draw(Game1.staminaRect, new Rectangle(x + w - thickness, y, thickness, h), info.color);
+
+                DrawComboLabel(b2, info.combo, bounds, info.color);
+            }
+        }
+
+        private void DrawComboLabel(SpriteBatch b, string combo, Rectangle slot, Color color)
+        {
+            var font = Game1.smallFont;
+            float textScale = 0.6f;
+            int iconSize = 24;
+            int textHeight = (int)(font.MeasureString("Mg").Y * textScale);
+
+            float totalWidth = 0;
+            var segments = ParseSegments(combo);
+            foreach (var seg in segments)
+            {
+                if (seg.shape != null)
+                    totalWidth += iconSize;
+                else
+                    totalWidth += font.MeasureString(seg.text!).X * textScale;
+            }
+
+            int labelBottom = slot.Y + 6;
+            int curX = slot.X + (slot.Width - (int)totalWidth) / 2;
+
+            foreach (var seg in segments)
+            {
+                if (seg.shape != null)
+                {
+                    int sy = labelBottom - iconSize;
+                    DrawShape(b, seg.shape, curX, sy, iconSize, color);
+                    curX += iconSize;
+                }
+                else
+                {
+                    int ty = labelBottom - textHeight - (iconSize - textHeight) / 2;
+                    var pos = new Vector2(curX, ty);
+                    for (int dx = -2; dx <= 2; dx++)
+                        for (int dy = -2; dy <= 2; dy++)
+                            if (dx != 0 || dy != 0)
+                                b.DrawString(font, seg.text!, pos + new Vector2(dx, dy), Color.Black, 0f, Vector2.Zero, textScale, SpriteEffects.None, 1f);
+                    b.DrawString(font, seg.text!, pos, Color.White, 0f, Vector2.Zero, textScale, SpriteEffects.None, 1f);
+                    curX += (int)(font.MeasureString(seg.text!).X * textScale);
+                }
+            }
+        }
+
+        private struct Segment { public string? text; public string? shape; }
+
+        private List<Segment> ParseSegments(string combo)
+        {
+            var result = new List<Segment>();
+            var buf = new System.Text.StringBuilder();
+            foreach (char ch in combo)
+            {
+                string? shape = ch switch
+                {
+                    '✕' => "X",
+                    '○' => "O",
+                    '□' => "S",
+                    '△' => "T",
+                    _ => null
+                };
+
+                if (shape != null)
+                {
+                    if (buf.Length > 0)
+                    {
+                        result.Add(new Segment { text = buf.ToString() });
+                        buf.Clear();
+                    }
+                    result.Add(new Segment { shape = shape });
+                }
+                else
+                {
+                    buf.Append(ch);
+                }
+            }
+            if (buf.Length > 0)
+                result.Add(new Segment { text = buf.ToString() });
+            return result;
+        }
+
+        private void DrawShape(SpriteBatch b, string shape, int x, int y, int size, Color color)
+        {
+            if (buttonSheet == null) return;
+
+            bool sony = Config.ControllerStyle == "Sony";
+            int row = sony ? 1 : 0;
+            int col = shape switch
+            {
+                "X" => 0,
+                "O" => 1,
+                "S" => 2,
+                "T" => 3,
+                _ => 0
+            };
+            var src = new Rectangle(col * 32, row * 32, 32, 32);
+            var dst = new Rectangle(x, y, size, size);
+            b.Draw(buttonSheet, dst, src, Color.White);
+        }
+
+        private string ShortenCombo(string combo)
+            => string.Join("+", combo.Split('+').Select(ShortenButton));
+
+        private string ShortenButton(string name)
+        {
+            bool sony = Config.ControllerStyle == "Sony";
+            return name switch
+            {
+                "LeftShoulder"   => sony ? "L1" : "LB",
+                "RightShoulder"  => sony ? "R1" : "RB",
+                "LeftTrigger"    => sony ? "L2" : "LT",
+                "RightTrigger"   => sony ? "R2" : "RT",
+                "LeftStick"      => sony ? "L3" : "LS",
+                "RightStick"     => sony ? "R3" : "RS",
+                "ControllerA"    => sony ? "✕" : "A",
+                "ControllerB"    => sony ? "○" : "B",
+                "ControllerX"    => sony ? "□" : "X",
+                "ControllerY"    => sony ? "△" : "Y",
+                "ControllerStart" => sony ? "Opt" : "Menu",
+                "ControllerBack"  => sony ? "Shr" : "View",
+                "DPadUp"    => "Up",
+                "DPadDown"  => "Dn",
+                "DPadLeft"  => "Lt",
+                "DPadRight" => "Rt",
+                "LeftControl"  => "Ctrl",
+                "RightControl" => "Ctrl",
+                "LeftShift"    => "Shift",
+                "RightShift"   => "Shift",
+                "LeftAlt"  => "Alt",
+                "RightAlt" => "Alt",
+                "OemTilde"         => "~",
+                "OemComma"         => ",",
+                "OemPeriod"        => ".",
+                "OemQuestion"      => "/",
+                "OemSemicolon"     => ";",
+                "OemQuotes"        => "'",
+                "OemOpenBrackets"  => "[",
+                "OemCloseBrackets" => "]",
+                "OemMinus"         => "-",
+                "OemPlus"          => "+",
+                "OemBackslash"     => "\\",
+                "OemPipe"          => "|",
+                _ => name
+            };
+        }
     }
 
     public class DialogueBoxWithItemIcon : DialogueBox
