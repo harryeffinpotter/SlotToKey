@@ -30,7 +30,7 @@ namespace QuickSelect
         private string? bindCountdownTarget;
         private int bindCooldown = 0;
 
-        // wait til all combo buttons released before firing
+        // dont fire til all buttons released
         private ItemBinding? pendingBinding = null;
         private Farmer? pendingPlayer = null;
         private List<SButton> pendingComboButtons = new();
@@ -49,8 +49,8 @@ namespace QuickSelect
         private static readonly HashSet<string> BuiltInConsumableIds = new()
         {
             "286", "287", "288", // bombs
-            "749",               // staircase
-            "891",               // qi seasoning
+            "749",  // stairs
+            "891",  // qi seasoning
         };
 
         private Texture2D? buttonSheet;
@@ -152,8 +152,6 @@ namespace QuickSelect
             );
         }
 
-        // helpers
-
         private string GetButtonKey(IEnumerable<SButton> buttons)
             => string.Join("+", buttons.OrderBy(b => b).Select(b => b.ToString()));
 
@@ -162,7 +160,7 @@ namespace QuickSelect
         private bool IsModifierHeld()
             => Config.ModifierKeys.Any(heldButtons.Contains) || Config.ModifierButtons.Any(heldButtons.Contains);
 
-        // dont suppress A/interact, only tool-use buttons
+        // dont suppress A — its used for menus n shit
         private bool IsUseButton(SButton button)
             => button == SButton.MouseLeft || button == SButton.ControllerX;
 
@@ -184,15 +182,12 @@ namespace QuickSelect
         private void ShowHUD(string message)
             => Game1.addHUDMessage(new HUDMessage(message) { noIcon = true });
 
-        // input
-
         private void OnButtonPressed(object? sender, ButtonPressedEventArgs e)
         {
             Farmer? currentPlayer = GetCurrentPlayer();
             if (currentPlayer == null) return;
 
-            // snapshot current item BEFORE the button does anything (R1 shifts toolbar etc)
-            // only on fresh press session, dont overwrite mid-combo
+            // grab current item before R1 shifts the toolbar
             if (heldButtons.Count == 0 && currentPlayer.CurrentItem != null)
                 lastKnownItem = currentPlayer.CurrentItem;
 
@@ -219,8 +214,7 @@ namespace QuickSelect
 
             heldButtons.Add(e.Button);
 
-            if (!Context.IsWorldReady || Game1.activeClickableMenu != null)
-                return;
+            if (!Context.IsWorldReady) return;
 
             if (e.Button == Config.BindModeKey)
             {
@@ -252,20 +246,30 @@ namespace QuickSelect
                 foreach (var btn in comboButtons)
                     Helper.Input.Suppress(btn);
 
+                // if circle opened inventory before r1 came in, kill it
+                if (Game1.activeClickableMenu != null)
+                {
+                    try { Game1.activeClickableMenu.exitThisMenu(playSound: false); } catch { }
+                    Game1.activeClickableMenu = null;
+                }
+
                 pendingBinding = binding;
                 pendingPlayer = currentPlayer;
                 pendingComboButtons = new List<SButton>(comboButtons);
                 heldButtons.Clear();
+                return;
             }
-            else if (!IsModifierHeld())
-            {
+
+            if (Game1.activeClickableMenu != null)
+                return;
+
+            if (!IsModifierHeld())
                 heldButtons.Clear();
-            }
         }
 
         private void OnButtonReleased(object? sender, ButtonReleasedEventArgs e)
         {
-            // fire pending bind once ALL buttons are released
+            // fires once everything is released
             if (pendingBinding != null)
             {
                 pendingComboButtons.Remove(e.Button);
@@ -329,15 +333,13 @@ namespace QuickSelect
             }
         }
 
-        // tick
-
         private void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)
         {
-            // watchdog so swap back can never get permanently stuck
+            // watchdog, never let swap back get stuck
             if (swapBackState != SwapBackState.None || suppressNextUse)
             {
                 stateWatchdog++;
-                if (stateWatchdog > 300)
+                if (stateWatchdog > 180)
                 {
                     swapBackState = SwapBackState.None;
                     suppressNextUse = false;
@@ -346,7 +348,7 @@ namespace QuickSelect
                     if (Context.IsWorldReady)
                     {
                         Game1.player.completelyStopAnimatingOrDoingAction();
-                        Game1.player.CanMove = true;
+                        Game1.player.forceCanMove();
                     }
                     stateWatchdog = 0;
                 }
@@ -356,11 +358,13 @@ namespace QuickSelect
                 stateWatchdog = 0;
             }
 
-            // never let player be frozen if we have nothing happening
+            // if you somehow got frozen and theres no reason for it, unfreeze
             if (Context.IsWorldReady && !Game1.player.CanMove && swapBackState == SwapBackState.None
-                && Game1.activeClickableMenu == null && !Game1.player.UsingTool && !Game1.player.isEating)
+                && Game1.activeClickableMenu == null && !Game1.player.UsingTool && !Game1.player.isEating
+                && !Game1.eventUp && !Game1.fadeToBlack)
             {
                 Game1.player.completelyStopAnimatingOrDoingAction();
+                Game1.player.forceCanMove();
                 Game1.player.CanMove = true;
             }
 
@@ -411,31 +415,25 @@ namespace QuickSelect
                     swapBackTimer--;
                     if (swapBackTimer <= 0)
                     {
-                        if (Game1.player.CanMove && Game1.activeClickableMenu == null)
-                        {
-                            Game1.player.eatHeldObject();
-                            swapBackState = SwapBackState.WaitingForEatFinish;
-                            swapBackTimer = 5;
-                        }
-                        else if (swapBackTimer < -120)
-                        {
-                            swapBackState = SwapBackState.None;
-                            previousItem = null;
-                        }
+                        Game1.player.eatHeldObject();
+                        swapBackState = SwapBackState.WaitingForEatFinish;
+                        swapBackTimer = 180; // hard cap, 3 sec
                     }
                     break;
 
                 case SwapBackState.WaitingForEatFinish:
-                    if (Game1.player.isEating)
-                        swapBackTimer = 5;
-                    else
+                    swapBackTimer--;
+                    if (!Game1.player.isEating || swapBackTimer <= 0)
                     {
-                        swapBackTimer--;
-                        if (swapBackTimer <= 0)
+                        // force unstick if eating never finished
+                        if (Game1.player.isEating)
                         {
-                            swapBackState = SwapBackState.SwapBack;
-                            swapBackTimer = 1;
+                            try { Game1.player.doneEating(); } catch { }
                         }
+                        Game1.player.completelyStopAnimatingOrDoingAction();
+                        Game1.player.forceCanMove();
+                        swapBackState = SwapBackState.SwapBack;
+                        swapBackTimer = 2;
                     }
                     break;
 
@@ -444,13 +442,12 @@ namespace QuickSelect
                     if (swapBackTimer <= 0)
                     {
                         SwapBackToPreviousItem();
+                        Game1.player.forceCanMove();
                         swapBackState = SwapBackState.None;
                     }
                     break;
             }
         }
-
-        // bind mode
 
         private void StartBindMode(Farmer player)
         {
@@ -482,7 +479,7 @@ namespace QuickSelect
             string buttonKey = GetButtonKey(validButtons);
             string itemName = currentItemNameToBind!;
 
-            // dupe prevention
+            // no dupes
             if (bindings.ContainsKey(buttonKey))
                 bindings.Remove(buttonKey);
 
@@ -499,8 +496,6 @@ namespace QuickSelect
             heldButtons.Clear();
         }
 
-        // item selection
-
         private void HandleBindingTriggered(Farmer player, ItemBinding binding)
         {
             Item? prevItem = lastKnownItem;
@@ -515,18 +510,16 @@ namespace QuickSelect
 
                 if (swapBackItemIsFood)
                 {
-                    // calling eatHeldObject during input events freezes the game, defer it
+                    // gotta wait a tick, calling eat during the press freezes shit
                     swapBackState = SwapBackState.WaitingToEat;
                     swapBackTimer = 3;
                 }
-                else
+                else if (player.CurrentItem is StardewValley.Object obj)
                 {
-                    Game1.pressActionButton(
-                        Microsoft.Xna.Framework.Input.Keyboard.GetState(),
-                        Microsoft.Xna.Framework.Input.Mouse.GetState(),
-                        Microsoft.Xna.Framework.Input.GamePad.GetState(Microsoft.Xna.Framework.PlayerIndex.One));
+                    // drop bomb/stairs right at our feet
+                    DirectPlaceItem(obj);
                     swapBackState = SwapBackState.SwapBack;
-                    swapBackTimer = 90;
+                    swapBackTimer = 5;
                 }
                 suppressNextUse = false;
             }
@@ -535,6 +528,22 @@ namespace QuickSelect
                 suppressNextUse = true;
                 suppressUseTimeout = 10;
             }
+        }
+
+        private void DirectPlaceItem(StardewValley.Object obj)
+        {
+            try
+            {
+                int tileX = (int)Game1.player.Tile.X;
+                int tileY = (int)Game1.player.Tile.Y;
+                if (obj.placementAction(Game1.currentLocation, tileX * 64, tileY * 64, Game1.player))
+                {
+                    obj.Stack--;
+                    if (obj.Stack <= 0)
+                        Game1.player.removeItemFromInventory(obj);
+                }
+            }
+            catch { }
         }
 
         private bool SelectByItemName(Farmer player, string itemName)
@@ -603,8 +612,6 @@ namespace QuickSelect
             if (key != null)
                 bindings.Remove(key);
         }
-
-        // toolbar overlay
 
         private void OnRenderedHud(object? sender, RenderedHudEventArgs e)
         {

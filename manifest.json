@@ -10,7 +10,7 @@
   "UniqueID": "HarryEffinPotter.QuickSelect",
   "Name": "QuickSelect",
   "Author": "HarryEffinPotter",
-  "Version": "1.0.0-Debug",
+  "Version": "1.1.0",
   "Description": "Instantly equip any item with a key/button combo! Bind items or slots to custom hotkeys, with controller support! You can even bind any consumable to a hotkey and automatically use the consumable mid combat and swap-back.",
   "MinimumApiVersion": "4.0.0",
   "EntryDll": "QuickSelect.dll",

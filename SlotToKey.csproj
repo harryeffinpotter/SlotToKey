@@ -4,6 +4,7 @@
     <TargetFramework>net6.0</TargetFramework>
     <AssemblyName>QuickSelect</AssemblyName>
     <RootNamespace>QuickSelect</RootNamespace>
+    <Version>1.1.0</Version>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
