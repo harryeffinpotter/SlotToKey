@@ -1,4 +1,4 @@
-﻿using StardewModdingAPI;
+using StardewModdingAPI;
 using StardewValley;
 using StardewModdingAPI.Events;
 using System.Collections.Generic;
@@ -7,325 +7,605 @@ using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using System.Linq;
 
-namespace SlotToKey
+namespace QuickSelect
 {
+    public class ItemBinding
+    {
+        public string ItemName { get; set; } = "";
+    }
+
     public class ModEntry : Mod
     {
-        private ModConfig Config;
-        private Dictionary<long, Dictionary<string, string>> playerSlotBindings = new Dictionary<long, Dictionary<string, string>>();
+        private ModConfig Config = null!;
+        private Dictionary<long, Dictionary<string, ItemBinding>> playerSlotBindings = new();
+
         private bool isBindingMode = false;
-        private int currentSlotToBind = -1;
-        private List<SButton> heldButtons = new List<SButton>();
+        private string? currentItemNameToBind;
+        private Item? currentItemToBind;
         private long currentPlayerID;
-        private string currentItemIdToBind;
+        private List<SButton> heldButtons = new();
+
+        private int bindHoldStartTick = -1;
+        private int bindCountdown = 0;
+        private string? bindCountdownTarget;
+        private int bindCooldown = 0;
+
+        // combo fires on release, not press
+        private ItemBinding? pendingBinding = null;
+        private Farmer? pendingPlayer = null;
+        private List<SButton> pendingComboButtons = new();
+
+        private bool suppressNextUse = false;
+        private int suppressUseTimeout = 0;
+
+        // auto-use + swap back state
+        private enum SwapBackState { None, WaitingToEat, WaitingForEatFinish, SwapBack }
+        private SwapBackState swapBackState = SwapBackState.None;
+        private Item? previousItem = null;
+        private Item? lastKnownItem = null;
+        private int swapBackTimer = 0;
+        private bool swapBackItemIsFood = false;
+
+        private static readonly HashSet<string> BuiltInConsumableIds = new()
+        {
+            "286", "287", "288", // cherry bomb, bomb, mega bomb
+            "749",               // staircase
+            "891",               // qi seasoning
+        };
 
         public override void Entry(IModHelper helper)
         {
-            this.Config = this.Helper.ReadConfig<ModConfig>();
+            Config = helper.ReadConfig<ModConfig>();
+            helper.Events.GameLoop.GameLaunched += OnGameLaunched;
+            helper.Events.GameLoop.SaveLoaded += OnSaveLoaded;
+            helper.Events.GameLoop.Saving += OnSaving;
             helper.Events.Input.ButtonPressed += OnButtonPressed;
             helper.Events.Input.ButtonReleased += OnButtonReleased;
-            helper.Events.Input.ButtonsChanged += OnButtonsChanged;
+            helper.Events.GameLoop.UpdateTicked += OnUpdateTicked;
         }
 
-        private string GetButtonKey(List<SButton> buttons)
+        private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
         {
-            return string.Join("+", buttons.Select(b => b.ToString()));
+            playerSlotBindings.Clear();
+            Farmer? player = GetCurrentPlayer();
+            if (player == null) return;
+
+            var bindings = new Dictionary<string, ItemBinding>();
+            foreach (var kv in Config.Bindings)
+                bindings[kv.Key] = new ItemBinding { ItemName = kv.Value };
+
+            playerSlotBindings[player.UniqueMultiplayerID] = bindings;
+            Monitor.Log($"Loaded {Config.Bindings.Count} bindings.", LogLevel.Info);
         }
 
-        private void BindHeldButtons()
+        private void OnSaving(object? sender, SavingEventArgs e) => SaveBindings();
+
+        #region GMCM
+
+        private void OnGameLaunched(object? sender, GameLaunchedEventArgs e)
         {
-            if (currentSlotToBind == -1 || !isBindingMode) return;
-            if (!playerSlotBindings.TryGetValue(currentPlayerID, out var bindings))
-            {
-                bindings = new Dictionary<string, string>();
-                playerSlotBindings[currentPlayerID] = bindings;
-            }
-
-            string buttonKey = GetButtonKey(heldButtons);
-
-            if (heldButtons.Count == 1)
-            {
-                var forbiddenButtons = this.Config.DisabledSingleButtons;
-                if (forbiddenButtons.Contains(heldButtons[0]))
-                {
-                    return;
-                }
-
-                bindings[buttonKey] = currentItemIdToBind;
-                Monitor.Log($"Bound buttons {buttonKey} to item ID {currentItemIdToBind} for player {currentPlayerID}", LogLevel.Info);
-            }
-            else if (heldButtons.Count > 1)
-            {
-                bindings[buttonKey] = currentItemIdToBind;
-                Monitor.Log($"Bound combo {buttonKey} to item ID {currentItemIdToBind} for player {currentPlayerID}", LogLevel.Info);
-            }
-
-            isBindingMode = false;
-            currentSlotToBind = -1;
-            currentItemIdToBind = null;
-            heldButtons.Clear();
-        }
-
-        private void OnButtonReleased(object? sender, ButtonReleasedEventArgs e)
-        {
-            if (!Context.IsWorldReady)
-            {
-                heldButtons.Clear();
-                return;
-            }
-            Farmer currentPlayer = GetCurrentPlayer();
-
-            if (heldButtons.Contains(SButton.OemTilde))
-            {
-                if (!playerSlotBindings.ContainsKey(currentPlayer.UniqueMultiplayerID))
-                {
-                    playerSlotBindings[currentPlayer.UniqueMultiplayerID] = new Dictionary<string, string>();
-                }
-
-                var bindings = playerSlotBindings[Game1.player.UniqueMultiplayerID];
-                bindings.Clear();
-            }
-
-            if (e.Button == SButton.F1 || e.Button == SButton.ControllerBack)
-            {
-                return;
-            }
-
-            if (isBindingMode)
-            {
-                BindHeldButtons();
-
-                if (Game1.activeClickableMenu != null)
-                {
-                    Game1.activeClickableMenu.exitThisMenu();
-                }
-                isBindingMode = false;
-                heldButtons.Clear();
-            }
-            else
-            {
-                var forbiddenButtons = this.Config.DisabledSingleButtons;
-
-                if (heldButtons.Count == 1 && forbiddenButtons.Contains(heldButtons[0]))
-                {
-                    heldButtons.Clear();
-                    return;
-                }
-
-                if (!playerSlotBindings.ContainsKey(currentPlayer.UniqueMultiplayerID))
-                {
-                    playerSlotBindings[currentPlayer.UniqueMultiplayerID] = new Dictionary<string, string>();
-                }
-
-                var bindings = playerSlotBindings[Game1.player.UniqueMultiplayerID];
-                string buttonKey = GetButtonKey(heldButtons);
-
-                if (bindings.ContainsKey(buttonKey))
-                {
-                    Monitor.Log($"KEY FOUND: {buttonKey}", LogLevel.Debug);
-                    string itemId = bindings[buttonKey];
-                    SelectInventoryItem(Game1.player, itemId);
-
-                }
-                heldButtons.Clear();
-            }
-        }
-
-
-
-
-        private void OnButtonsChanged(object? sender, ButtonsChangedEventArgs e)
-        {
-            Farmer currentPlayer = GetCurrentPlayer();
-            if (currentPlayer == null || !playerSlotBindings.ContainsKey(currentPlayer.UniqueMultiplayerID))
+            var configMenu = Helper.ModRegistry.GetApi<IGenericModConfigMenuApi>("spacechase0.GenericModConfigMenu");
+            if (configMenu is null)
                 return;
 
-            var bindings = playerSlotBindings[currentPlayer.UniqueMultiplayerID];
-            string buttonKey = GetButtonKey(e.Held.ToList());
+            configMenu.Register(
+                mod: ModManifest,
+                reset: () => Config = new ModConfig(),
+                save: () => Helper.WriteConfig(Config)
+            );
 
-            // Only suppress if the current button combination is found in the bindings dictionary
-            if (bindings.ContainsKey(buttonKey))
-            {
-                foreach (SButton pressedButton in e.Pressed)
-                {
-                    this.Helper.Input.Suppress(pressedButton);
-                }
+            configMenu.AddSectionTitle(mod: ModManifest, text: () => "Binding Controls");
 
-                // Trigger the bound action for key combos
-                string itemId = bindings[buttonKey];
-                SelectInventoryItem(Game1.player, itemId);
+            configMenu.AddKeybind(
+                mod: ModManifest,
+                getValue: () => Config.BindModeKey,
+                setValue: v => Config.BindModeKey = v,
+                name: () => "Bind Mode Key (Keyboard)",
+                tooltip: () => "Press this while holding an item to bind it"
+            );
 
-                // Clear held buttons after handling the action
-                heldButtons.Clear();
-            }
+            configMenu.AddKeybind(
+                mod: ModManifest,
+                getValue: () => Config.BindModeButton,
+                setValue: v => Config.BindModeButton = v,
+                name: () => "Bind Mode Button (Controller)",
+                tooltip: () => "Hold this while holding an item to bind it"
+            );
+
+            configMenu.AddKeybind(
+                mod: ModManifest,
+                getValue: () => Config.ClearAllBindingsKey,
+                setValue: v => Config.ClearAllBindingsKey = v,
+                name: () => "Clear All Bindings Key",
+                tooltip: () => "Hold and release to wipe all keybinds"
+            );
+
+            configMenu.AddSectionTitle(mod: ModManifest, text: () => "Auto-Use");
+
+            configMenu.AddBoolOption(
+                mod: ModManifest,
+                getValue: () => Config.AutoUseAndSwapBack,
+                setValue: v => Config.AutoUseAndSwapBack = v,
+                name: () => "Auto-Use & Swap Back",
+                tooltip: () => "ON: food/bombs/stairs auto-use and swap back. OFF: just equips."
+            );
+
+            configMenu.AddSectionTitle(mod: ModManifest, text: () => "Advanced");
+
+            configMenu.AddParagraph(
+                mod: ModManifest,
+                text: () => "Modifier keys, directional buttons, disabled buttons, and extra consumable IDs can be edited in config.json."
+            );
         }
 
+        #endregion
+
+        #region Helpers
+
+        private string GetButtonKey(IEnumerable<SButton> buttons)
+            => string.Join("+", buttons.OrderBy(b => b).Select(b => b.ToString()));
+
+        private bool IsDirectionalButton(SButton button) => Config.DirectionalButtons.Contains(button);
+
+        private bool IsModifierHeld()
+            => Config.ModifierKeys.Any(heldButtons.Contains) || Config.ModifierButtons.Any(heldButtons.Contains);
+
+        // dont suppress A/interact, only tool-use buttons
+        private bool IsUseButton(SButton button)
+            => button == SButton.MouseLeft || button == SButton.ControllerX;
+
+        private Farmer? GetCurrentPlayer()
+            => Game1.getAllFarmers().FirstOrDefault(f => f.IsLocalPlayer);
+
+        private bool IsConsumable(Item? item)
+        {
+            if (item is not StardewValley.Object obj) return false;
+            if (obj.Edibility > 0) return true;
+            if (BuiltInConsumableIds.Contains(obj.ItemId)) return true;
+            if (Config.ExtraConsumableIds.Contains(obj.ItemId)) return true;
+            return false;
+        }
+
+        private bool IsEdible(Item? item)
+            => item is StardewValley.Object obj && obj.Edibility > 0;
+
+        private void ShowHUD(string message)
+            => Game1.addHUDMessage(new HUDMessage(message) { noIcon = true });
+
+        #endregion
+
+        #region Input
 
         private void OnButtonPressed(object? sender, ButtonPressedEventArgs e)
         {
-            Farmer currentPlayer = GetCurrentPlayer();
-            if (currentPlayer == null || !playerSlotBindings.ContainsKey(currentPlayer.UniqueMultiplayerID))
+            Farmer? currentPlayer = GetCurrentPlayer();
+            if (currentPlayer == null) return;
+
+            // snapshot what were holding BEFORE the button does anything (r1 shifts toolbar etc)
+            if (currentPlayer.CurrentItem != null)
+                lastKnownItem = currentPlayer.CurrentItem;
+
+            if (!playerSlotBindings.ContainsKey(currentPlayer.UniqueMultiplayerID))
+                playerSlotBindings[currentPlayer.UniqueMultiplayerID] = new Dictionary<string, ItemBinding>();
+
+            if (suppressNextUse && IsUseButton(e.Button))
+            {
+                Helper.Input.Suppress(e.Button);
                 return;
+            }
+
+            if (bindCountdown > 0)
+            {
+                Helper.Input.Suppress(e.Button);
+                return;
+            }
+
+            if (isBindingMode && e.Button == Config.BindModeButton)
+            {
+                Helper.Input.Suppress(e.Button);
+                return;
+            }
 
             heldButtons.Add(e.Button);
-
-            Monitor.Log($"Currently held buttons: {string.Join(", ", heldButtons)}", LogLevel.Info);
-            Monitor.Log($"Button Pressed: {e.Button.ToString()}", LogLevel.Debug);
 
             if (!Context.IsWorldReady || Game1.activeClickableMenu != null)
                 return;
 
-            if (e.Button == SButton.F1 || e.Button == SButton.ControllerBack)
+            // keyboard bind mode — instant
+            if (e.Button == Config.BindModeKey)
             {
+                Helper.Input.Suppress(e.Button);
                 heldButtons.Clear();
-                EnterBindingMode(currentPlayer);
+                StartBindMode(currentPlayer);
                 return;
             }
 
-            // Handle keybindings for combos
-            string buttonKey = GetButtonKey(heldButtons);
-
-            if (playerSlotBindings.ContainsKey(currentPlayer.UniqueMultiplayerID)
-                && playerSlotBindings[currentPlayer.UniqueMultiplayerID].ContainsKey(buttonKey))
+            // controller bind mode — hold to activate
+            if (e.Button == Config.BindModeButton)
             {
-                string itemId = playerSlotBindings[currentPlayer.UniqueMultiplayerID][buttonKey];
-                SelectInventoryItem(Game1.player, itemId);
-
-                // Only clear held buttons if no modifier keys are held
-                if (!IsModifierHeld())
-                {
-                    heldButtons.Clear(); // Clear after successfully selecting the item if no modifiers
-                }
+                bindHoldStartTick = (int)Game1.ticks;
+                heldButtons.Remove(e.Button);
+                return;
             }
 
-            // Clear buttons if no valid binding is found and no modifier keys are held
-            else if (!playerSlotBindings[currentPlayer.UniqueMultiplayerID].ContainsKey(buttonKey) && !IsModifierHeld())
+            // skip matching during cooldown or active auto-use
+            if (bindCooldown > 0 || swapBackState != SwapBackState.None)
+                return;
+
+            // match combo
+            var comboButtons = heldButtons.Where(b => !IsDirectionalButton(b)).ToList();
+            if (comboButtons.Count == 0) return;
+            if (comboButtons.Count == 1 && Config.DisabledSingleButtons.Contains(comboButtons[0])) return;
+
+            string buttonKey = GetButtonKey(comboButtons);
+            var bindings = playerSlotBindings[currentPlayer.UniqueMultiplayerID];
+
+            if (bindings.TryGetValue(buttonKey, out var binding))
+            {
+                foreach (var btn in comboButtons)
+                    Helper.Input.Suppress(btn);
+
+                // recognized — but wait for all buttons released before firing
+                pendingBinding = binding;
+                pendingPlayer = currentPlayer;
+                pendingComboButtons = new List<SButton>(comboButtons);
+                heldButtons.Clear();
+            }
+            else if (!IsModifierHeld())
             {
                 heldButtons.Clear();
             }
         }
 
-
-
-        // Utility method to determine if a button is for movement (D-pad buttons)
-        private bool IsMovementButton(SButton button)
+        private void OnButtonReleased(object? sender, ButtonReleasedEventArgs e)
         {
-            return button == SButton.DPadUp || button == SButton.DPadDown || button == SButton.DPadLeft || button == SButton.DPadRight;
-        }
-
-        // Check if any modifier keys are currently held
-        private bool IsModifierHeld()
-        {
-            List<SButton> modButtons = new List<SButton>(this.Config.ModifierButtons);
-            List<SButton> modKeys = new List<SButton>(this.Config.ModifierKeys);
-            return modKeys.Any(heldButtons.Contains) || modButtons.Any(heldButtons.Contains);
-        }
-
-
-        private Farmer? GetCurrentPlayer()
-        {
-            foreach (Farmer farmer in Game1.getAllFarmers())
+            // pending combo fires once ALL buttons are released
+            if (pendingBinding != null)
             {
-                if (farmer.IsLocalPlayer)
+                pendingComboButtons.Remove(e.Button);
+                if (pendingComboButtons.Count == 0 && pendingPlayer != null)
                 {
-                    return farmer;
+                    var binding = pendingBinding;
+                    var player = pendingPlayer;
+                    pendingBinding = null;
+                    pendingPlayer = null;
+                    HandleBindingTriggered(player, binding);
+                }
+                return;
+            }
+
+            if (!Context.IsWorldReady)
+            {
+                heldButtons.Clear();
+                bindHoldStartTick = -1;
+                return;
+            }
+
+            if (e.Button == Config.BindModeButton && bindHoldStartTick >= 0)
+            {
+                bindHoldStartTick = -1;
+                return;
+            }
+
+            if (bindCountdown > 0) return;
+
+            Farmer? currentPlayer = GetCurrentPlayer();
+            if (currentPlayer == null) return;
+
+            if (heldButtons.Contains(Config.ClearAllBindingsKey))
+            {
+                if (playerSlotBindings.TryGetValue(currentPlayer.UniqueMultiplayerID, out var clearBindings))
+                {
+                    clearBindings.Clear();
+                    ShowHUD("All keybinds cleared.");
+                    SaveBindings();
+                }
+                heldButtons.Clear();
+                return;
+            }
+
+            if (e.Button == Config.BindModeKey || e.Button == Config.BindModeButton)
+                return;
+
+            if (isBindingMode)
+            {
+                FinalizeBind();
+                Game1.activeClickableMenu = null;
+                Game1.player.completelyStopAnimatingOrDoingAction();
+                suppressNextUse = false;
+                swapBackState = SwapBackState.None;
+                isBindingMode = false;
+                heldButtons.Clear();
+                bindCooldown = 30;
+            }
+            else
+            {
+                heldButtons.Remove(e.Button);
+            }
+        }
+
+        #endregion
+
+        #region Tick
+
+        private void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)
+        {
+            // controller hold-to-bind
+            if (bindHoldStartTick >= 0 && Context.IsWorldReady)
+            {
+                int holdTicks = (int)(Config.BindHoldMs / 1000f * 60f);
+                if ((int)Game1.ticks - bindHoldStartTick >= holdTicks)
+                {
+                    bindHoldStartTick = -1;
+                    Farmer? player = GetCurrentPlayer();
+                    if (player != null)
+                    {
+                        if (Game1.activeClickableMenu != null)
+                            Game1.activeClickableMenu.exitThisMenu();
+                        StartBindMode(player);
+                    }
                 }
             }
-            return null;
+
+            if (bindCooldown > 0)
+                bindCooldown--;
+
+            // pause before bind capture
+            if (bindCountdown > 0)
+            {
+                bindCountdown--;
+                if (bindCountdown == 0)
+                {
+                    isBindingMode = true;
+                    heldButtons.Clear();
+                    Game1.activeClickableMenu = new DialogueBoxWithItemIcon(
+                        $"Now press a button/combo to bind to {bindCountdownTarget}",
+                        currentItemToBind
+                    );
+                }
+                return;
+            }
+
+            if (suppressNextUse)
+            {
+                suppressUseTimeout--;
+                if (suppressUseTimeout <= 0)
+                    suppressNextUse = false;
+            }
+
+            // auto-use state machine
+            switch (swapBackState)
+            {
+                case SwapBackState.WaitingToEat:
+                    swapBackTimer--;
+                    if (swapBackTimer <= 0 && Game1.player.CanMove && Game1.activeClickableMenu == null)
+                    {
+                        Game1.player.eatHeldObject();
+                        swapBackState = SwapBackState.WaitingForEatFinish;
+                        swapBackTimer = 5;
+                    }
+                    break;
+
+                case SwapBackState.WaitingForEatFinish:
+                    if (Game1.player.isEating)
+                        swapBackTimer = 5;
+                    else
+                    {
+                        swapBackTimer--;
+                        if (swapBackTimer <= 0)
+                        {
+                            swapBackState = SwapBackState.SwapBack;
+                            swapBackTimer = 1;
+                        }
+                    }
+                    break;
+
+                case SwapBackState.SwapBack:
+                    swapBackTimer--;
+                    if (swapBackTimer <= 0)
+                    {
+                        SwapBackToPreviousItem();
+                        swapBackState = SwapBackState.None;
+                    }
+                    break;
+            }
         }
 
-        public void EnterBindingMode(Farmer currentPlayer)
+        #endregion
+
+        #region Bind Mode
+
+        private void StartBindMode(Farmer player)
         {
-            int currentSlot = currentPlayer.CurrentToolIndex;
-            var currentItem = currentPlayer.CurrentItem;
+            var currentItem = player.CurrentItem;
             if (currentItem == null) return;
 
-            currentSlotToBind = currentSlot;
-            currentItemIdToBind = currentItem.Name; // Use the item's name as the identifier
+            currentItemNameToBind = currentItem.Name;
+            currentItemToBind = currentItem;
+            currentPlayerID = player.UniqueMultiplayerID;
 
-            currentPlayerID = currentPlayer.UniqueMultiplayerID;
-            isBindingMode = true;
-
-            Game1.activeClickableMenu = new DialogueBoxWithCustomIcon(
-                $"Press a button to bind to item '{currentItem.DisplayName}' for player {currentPlayer.Name}",
-                new Rectangle(128, 256, 64, 64)
-            );
+            bindCountdownTarget = $"'{currentItem.DisplayName}'";
+            bindCountdown = 12;
+            ShowHUD($"Bind what button to {currentItem.DisplayName}?");
         }
 
-        private void SelectInventoryItem(Farmer player, string itemId)
+        private void FinalizeBind()
         {
-            if (player == null || player.Items == null || string.IsNullOrEmpty(itemId))
-                return;
+            if (!isBindingMode) return;
 
-            bool itemFound = false;
-            int desiredItemIndex = -1;
-            int currentIndex = 0;
-            foreach (var item in player.Items)
+            var validButtons = heldButtons.Where(b => !IsDirectionalButton(b)).ToList();
+            if (validButtons.Count == 0) return;
+            if (validButtons.Count == 1 && Config.DisabledSingleButtons.Contains(validButtons[0])) return;
+
+            if (!playerSlotBindings.TryGetValue(currentPlayerID, out var bindings))
             {
-                if (item?.Name == itemId)
-                {
-                    desiredItemIndex = currentIndex;
-                    itemFound = true;
-                    break;
-                }
-                currentIndex++;
+                bindings = new Dictionary<string, ItemBinding>();
+                playerSlotBindings[currentPlayerID] = bindings;
             }
 
-            if (!itemFound)
+            string buttonKey = GetButtonKey(validButtons);
+            string itemName = currentItemNameToBind!;
+
+            // prevent dupes
+            if (bindings.ContainsKey(buttonKey))
+                bindings.Remove(buttonKey);
+
+            var existingKey = bindings.FirstOrDefault(kv => kv.Value.ItemName == itemName).Key;
+            if (existingKey != null)
             {
-                Game1.activeClickableMenu = new DialogueBoxWithCustomIcon(
-                    $"Item with ID {itemId} not found in {player.Name}'s inventory. Removing keybind.",
-                    new Rectangle(0, 0, 64, 64)
-                );
-                RemoveKeyBindForItem(player, itemId);
-                return;
+                bindings.Remove(existingKey);
+                ShowHUD($"Replaced previous binding ({existingKey})");
             }
 
-            while (desiredItemIndex > 11)
-            {
-                desiredItemIndex -= 12;
-                player.shiftToolbar(true);
-            }
+            bindings[buttonKey] = new ItemBinding { ItemName = itemName };
+            ShowHUD($"Bound {buttonKey} to {itemName}");
+            SaveBindings();
 
-            player.CurrentToolIndex = desiredItemIndex;
+            isBindingMode = false;
+            currentItemNameToBind = null;
+            currentItemToBind = null;
             heldButtons.Clear();
         }
 
-        private void RemoveKeyBindForItem(Farmer player, string itemId)
+        #endregion
+
+        #region Item Selection
+
+        private void HandleBindingTriggered(Farmer player, ItemBinding binding)
         {
-            var bindings = playerSlotBindings[player.UniqueMultiplayerID];
-            var keyToRemove = bindings.FirstOrDefault(kv => kv.Value == itemId).Key;
-            if (keyToRemove != null)
+            Item? prevItem = lastKnownItem;
+
+            bool selected = SelectByItemName(player, binding.ItemName);
+            if (!selected) return;
+
+            if (Config.AutoUseAndSwapBack && IsConsumable(player.CurrentItem))
             {
-                bindings.Remove(keyToRemove);
+                previousItem = prevItem;
+                swapBackItemIsFood = IsEdible(player.CurrentItem);
+
+                if (swapBackItemIsFood)
+                {
+                    // eat on next tick — calling during input events freezes the game
+                    swapBackState = SwapBackState.WaitingToEat;
+                    swapBackTimer = 3;
+                }
+                else
+                {
+                    // bombs/stairs — place now, swap back after delay
+                    Game1.pressActionButton(
+                        Microsoft.Xna.Framework.Input.Keyboard.GetState(),
+                        Microsoft.Xna.Framework.Input.Mouse.GetState(),
+                        Microsoft.Xna.Framework.Input.GamePad.GetState(Microsoft.Xna.Framework.PlayerIndex.One));
+                    swapBackState = SwapBackState.SwapBack;
+                    swapBackTimer = 90;
+                }
+                suppressNextUse = false;
+            }
+            else
+            {
+                suppressNextUse = true;
+                suppressUseTimeout = 10;
             }
         }
+
+        private bool SelectByItemName(Farmer player, string itemName)
+        {
+            int idx = -1;
+            for (int i = 0; i < player.Items.Count; i++)
+            {
+                if (player.Items[i]?.Name == itemName)
+                {
+                    idx = i;
+                    break;
+                }
+            }
+
+            if (idx == -1)
+            {
+                Game1.activeClickableMenu = new DialogueBoxWithItemIcon(
+                    $"'{itemName}' not in inventory. Removing keybind."
+                );
+                RemoveBindingByItemName(player, itemName);
+                return false;
+            }
+
+            int shifts = idx / 12;
+            int slot = idx % 12;
+            for (int i = 0; i < shifts; i++)
+                player.shiftToolbar(true);
+            player.CurrentToolIndex = slot;
+            heldButtons.Clear();
+            return true;
+        }
+
+        private void SwapBackToPreviousItem()
+        {
+            Farmer player = Game1.player;
+            if (previousItem == null) return;
+
+            for (int i = 0; i < player.Items.Count; i++)
+            {
+                if (player.Items[i] == previousItem)
+                {
+                    int shifts = i / 12;
+                    int slot = i % 12;
+                    for (int j = 0; j < shifts; j++)
+                        player.shiftToolbar(true);
+                    player.CurrentToolIndex = slot;
+                    previousItem = null;
+                    return;
+                }
+            }
+            previousItem = null;
+        }
+
+        private void SaveBindings()
+        {
+            Config.Bindings.Clear();
+            foreach (var playerBinds in playerSlotBindings.Values)
+                foreach (var kv in playerBinds)
+                    Config.Bindings[kv.Key] = kv.Value.ItemName;
+            Helper.WriteConfig(Config);
+        }
+
+        private void RemoveBindingByItemName(Farmer player, string itemName)
+        {
+            if (!playerSlotBindings.TryGetValue(player.UniqueMultiplayerID, out var bindings))
+                return;
+            var key = bindings.FirstOrDefault(kv => kv.Value.ItemName == itemName).Key;
+            if (key != null)
+                bindings.Remove(key);
+        }
+
+        #endregion
     }
 
-    public class DialogueBoxWithCustomIcon : DialogueBox
+    public class DialogueBoxWithItemIcon : DialogueBox
     {
-        private Rectangle customIconSource;
+        private readonly Item? displayItem;
+        private float glowTimer = 0f;
 
-        public DialogueBoxWithCustomIcon(string dialogue, Rectangle iconSource) : base(dialogue)
+        public DialogueBoxWithItemIcon(string dialogue, Item? item = null) : base(dialogue)
         {
-            customIconSource = iconSource;
-            this.characterIndexInDialogue = dialogue.Length;
+            displayItem = item;
+            characterIndexInDialogue = dialogue.Length;
         }
 
         public override void draw(SpriteBatch b)
         {
             base.draw(b);
-            b.Draw(
-                Game1.mouseCursors,
-                new Vector2(xPositionOnScreen + width - 64, yPositionOnScreen + height - 64),
-                customIconSource,
-                Color.White,
-                0f,
-                Vector2.Zero,
-                4f,
-                SpriteEffects.None,
-                1f
-            );
+            Vector2 pos = new Vector2(xPositionOnScreen + width - 100, yPositionOnScreen + height - 100);
+
+            glowTimer += 0.05f;
+            float pulse = 0.8f + 0.2f * (float)System.Math.Sin(glowTimer);
+
+            IClickableMenu.drawTextureBox(b, Game1.menuTexture,
+                new Rectangle(128, 128, 64, 64),
+                (int)pos.X, (int)pos.Y, 80, 80,
+                Color.White * pulse, 1f, false);
+
+            if (displayItem != null)
+                displayItem.drawInMenu(b, pos + new Vector2(8, 8), 1f);
         }
     }
 }

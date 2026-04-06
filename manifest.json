@@ -7,12 +7,18 @@
    | 
    */
   "$schema": "https://smapi.io/schemas/manifest.json",
-  "UniqueID": "HarryEffinPotter.SlotToKey",
-  "Name": "SlotToKey",
+  "UniqueID": "HarryEffinPotter.QuickSelect",
+  "Name": "QuickSelect",
   "Author": "HarryEffinPotter",
   "Version": "1.0.0-Debug",
-  "Description": "Allows user to bind specific inventory item to any key/button! You can also bind key combos to a specific item as well. If you press a previously set keybind and the item is no longer in your inventory, it will automatically remove the keybind. Users can also clear all binds by pressing the correct key combo.",
+  "Description": "Instantly equip any item with a key/button combo! Bind items or slots to custom hotkeys, with controller support! You can even bind any consumable to a hotkey and automatically use the consumable mid combat and swap-back.",
   "MinimumApiVersion": "4.0.0",
-  "EntryDll": "SlotToKey.dll",
+  "EntryDll": "QuickSelect.dll",
+  "Dependencies": [
+    {
+      "UniqueID": "spacechase0.GenericModConfigMenu",
+      "IsRequired": false
+    }
+  ],
   "UpdateKeys": []
 }
